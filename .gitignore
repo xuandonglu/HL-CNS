@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+
+# Generated datasets, checkpoints, and plotting exports.
+**/data/
+**/data_*/
+**/model_*/
+**/mat_output/
+*.pt
+*.pth
+*.mat
+
+# Local scratch files.
+Untitled.m
+untitled.m
+.DS_Store
