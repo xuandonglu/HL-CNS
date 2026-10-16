@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
 
 # Generated datasets, checkpoints, and plotting exports.
 **/data/
@@ -9,8 +11,28 @@ __pycache__/
 *.pt
 *.pth
 *.mat
+*.ckpt
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.onnx
+*.safetensors
+
+# Generated logs and local environments.
+**/run_logs/
+*.log
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
 
 # Local scratch files.
 Untitled.m
 untitled.m
 .DS_Store
+Thumbs.db

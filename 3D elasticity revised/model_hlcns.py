@@ -357,28 +357,8 @@ class HLCNSSolver3D(nn.Module):
         return x.reshape(B, Dn, Hn, Wn, C).permute(0,4,1,2,3).contiguous()
 
     def _smooth(self, u, rhs, f, Kfield, bc_mask, bc_val, level: int, n_iter: int = 1):
-        dx_l = self.dx * (2**level)
-        free = (1.0 - bc_mask)
-        for _ in range(n_iter):
-            Au = self.vd_conv(u, Kfield)              # [B,C,D,H,W]
-            res = rhs - Au
-            Dblk = Kfield[:, :, :, 1,1,1, :, :, :]    # [B,C,C,D,H,W]
-            delta = self._solve_block(Dblk, res)      # block-Jacobi per voxel
-            # normalize residual for net
-            diag_main = torch.stack([Dblk[:, i, i] for i in range(self.C)], dim=1)
-            diag_char = diag_main.abs().clamp_min(1e-6)
-            r_norm = res / diag_char
-            feat = feature_scalar_or_von_mises(u, dx_l, self.problem_type)   # [B,1,D,H,W]
-            corr_in = torch.cat([r_norm, u, rhs, f, feat], dim=1)            # [B,4C+1,D,H,W]
-            corr = self.correction_net(corr_in)
-            if self.corr_clip is not None:
-                corr = torch.clamp(corr, -self.corr_clip, self.corr_clip)
-            # voxelwise omega
-            omega_sigma = torch.sigmoid(self.omega_net(corr_in))
-            omega_field = self.omega_min + (self.omega_max - self.omega_min) * omega_sigma
-            upd = (omega_field * delta + self.psi_weight * corr) * free
-            u = self._apply_bc(u + upd, bc_mask, bc_val)
-        return u
+        smooth_impl = getattr(self, "_smooth_impl", smooth_hlcns_full)
+        return smooth_impl(self, u, rhs, f, Kfield, bc_mask, bc_val, level, n_iter)
 
     # ------------- V-cycle -------------
     def _v_cycle(self, u, rhs, f, bc_mask, bc_val, level: int = 0):
@@ -422,6 +402,103 @@ class HLCNSSolver3D(nn.Module):
     def get_noise_kernel(self, u, f, bc_mask, bc_val):
         feat = feature_scalar_or_von_mises(u, self.dx, self.problem_type)
         return self.noise_net(feat)
+
+
+def _smooth_common_inputs(model, u, rhs, f, Kfield, level: int):
+    dx_l = model.dx * (2**level)
+    Au = model.vd_conv(u, Kfield)
+    res = rhs - Au
+    Dblk = Kfield[:, :, :, 1, 1, 1, :, :, :]
+    delta = model._solve_block(Dblk, res)
+    diag_main = torch.stack([Dblk[:, i, i] for i in range(model.C)], dim=1)
+    diag_char = diag_main.abs().clamp_min(1e-6)
+    r_norm = res / diag_char
+    feat = feature_scalar_or_von_mises(u, dx_l, model.problem_type)
+    corr_in = torch.cat([r_norm, u, rhs, f, feat], dim=1)
+    return delta, corr_in
+
+
+def smooth_hlcns_full(model, u, rhs, f, Kfield, bc_mask, bc_val, level: int, n_iter: int = 1):
+    free = 1.0 - bc_mask
+    for _ in range(n_iter):
+        delta, corr_in = _smooth_common_inputs(model, u, rhs, f, Kfield, level)
+        corr = model.correction_net(corr_in)
+        if model.corr_clip is not None:
+            corr = torch.clamp(corr, -model.corr_clip, model.corr_clip)
+        model._last_correction = corr
+
+        omega_sigma = torch.sigmoid(model.omega_net(corr_in))
+        omega_field = model.omega_min + (model.omega_max - model.omega_min) * omega_sigma
+        upd = (omega_field * delta + model.psi_weight * corr) * free
+        u = model._apply_bc(u + upd, bc_mask, bc_val)
+    return u
+
+
+def smooth_hlcns_no_correction(model, u, rhs, f, Kfield, bc_mask, bc_val, level: int, n_iter: int = 1):
+    free = 1.0 - bc_mask
+    for _ in range(n_iter):
+        delta, corr_in = _smooth_common_inputs(model, u, rhs, f, Kfield, level)
+        model._last_correction = torch.zeros_like(delta)
+
+        omega_sigma = torch.sigmoid(model.omega_net(corr_in))
+        omega_field = model.omega_min + (model.omega_max - model.omega_min) * omega_sigma
+        upd = (omega_field * delta) * free
+        u = model._apply_bc(u + upd, bc_mask, bc_val)
+    return u
+
+
+def smooth_hlcns_no_relaxation(model, u, rhs, f, Kfield, bc_mask, bc_val, level: int, n_iter: int = 1):
+    free = 1.0 - bc_mask
+    for _ in range(n_iter):
+        delta, corr_in = _smooth_common_inputs(model, u, rhs, f, Kfield, level)
+        corr = model.correction_net(corr_in)
+        if model.corr_clip is not None:
+            corr = torch.clamp(corr, -model.corr_clip, model.corr_clip)
+        model._last_correction = corr
+
+        omega_field = torch.full_like(delta, model.omega)
+        upd = (omega_field * delta + model.psi_weight * corr) * free
+        u = model._apply_bc(u + upd, bc_mask, bc_val)
+    return u
+
+
+def smooth_hlcns_jacobi(model, u, rhs, f, Kfield, bc_mask, bc_val, level: int, n_iter: int = 1):
+    """Plain damped Jacobi smoother: u <- u + omega * D^{-1}(rhs - K u)."""
+    free = 1.0 - bc_mask
+    for _ in range(n_iter):
+        delta, _ = _smooth_common_inputs(model, u, rhs, f, Kfield, level)
+        model._last_correction = torch.zeros_like(delta)
+        upd = (float(model.omega) * delta) * free
+        u = model._apply_bc(u + upd, bc_mask, bc_val)
+    return u
+
+
+class HLCNSNoCorrection3D(HLCNSSolver3D):
+    """Ablation: remove the learned correction network from the smoother."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.correction_net = nn.Identity()
+        self._smooth_impl = smooth_hlcns_no_correction
+
+
+class HLCNSNoRelaxation3D(HLCNSSolver3D):
+    """Ablation: remove the learned relaxation network from the smoother."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.omega_net = nn.Identity()
+        self._smooth_impl = smooth_hlcns_no_relaxation
+
+
+class HLCNSJacobi3D(HLCNSSolver3D):
+    """Ablation/baseline: replace the learned smoother with a plain damped Jacobi step."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.correction_net = nn.Identity()
+        self.omega_net = nn.Identity()
+        self._smooth_impl = smooth_hlcns_jacobi
 
 # -------------------- Example BC helpers --------------------
 
