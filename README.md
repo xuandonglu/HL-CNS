@@ -2,6 +2,8 @@
 
 This repository contains the three numerical examples used in the HL-CNS manuscript.
 
+Associated paper: [View the article on ScienceDirect](https://www.sciencedirect.com/science/article/pii/S0925231226022927).
+
 ## Case Layout
 
 | Folder | Manuscript case | Tasks |
