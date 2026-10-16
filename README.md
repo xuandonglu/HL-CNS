@@ -1,6 +1,6 @@
 # HL-CNS Benchmark Examples
 
-This repository contains the three numerical examples used in the HL-CNS manuscript.
+This repository contains the code for the three numerical examples presented in the HL-CNS article.
 
 Associated paper: [View the article on ScienceDirect](https://www.sciencedirect.com/science/article/pii/S0925231226022927).
 
